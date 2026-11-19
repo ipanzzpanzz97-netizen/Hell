@@ -1,0 +1,7 @@
+
+---
+
+### 💡 Tip Pelaksanaan & Langkah Seterusnya
+1.  **Sediakan Pelayan API Terlebih Dahulu:** Pastikan model AI anda telah dihoskan pada pelayan awan menggunakan framework pelayan API seperti *Ollama*, *vLLM*, atau *TGI (Text Generation Inference)*. Pelayan ini yang akan menguruskan RAM dan ROM CXL anda di awan.
+2.  **Gunakan Docker:** Gunakan bekas Docker untuk melancarkan pangkalan data memori seperti Mem0 di sebelah pelayan AI anda bagi menjamin pengurusan memori konteks yang optimum.
+3.  **Uji API pada APK:** Setelah APK siap dipasang pada peranti Android anda, masukkan alamat IP pelayan awan anda (contohnya `http://192.168.x.x:8000/v1`) dan API Key untuk mula bersembang secara terus dengan model AI buatan anda sendiri.

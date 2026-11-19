@@ -1,0 +1,6 @@
+{
+  "name": "CarbonPro",
+  "description": "CarbonPro AI reasoning workspace with built-in cloud AI and custom API endpoint support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

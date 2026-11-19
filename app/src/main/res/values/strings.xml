@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">CarbonPro</string>
+    <string name="cd_open_drawer">Buka senarai sesi sembang</string>
+    <string name="cd_open_settings">Tetapan API dan Enjin</string>
+    <string name="cd_new_chat">Sembang baharu</string>
+    <string name="cd_back">Kembali</string>
+    <string name="cd_attach_image">Lampirkan imej daripada galeri</string>
+    <string name="cd_remove_image">Buang lampiran imej</string>
+    <string name="cd_send_prompt">Hantar arahan</string>
+    <string name="cd_stop_generation">Hentikan penjanaan</string>
+    <string name="cd_copy_text">Salin teks</string>
+    <string name="cd_copy_code">Salin kod</string>
+    <string name="cd_regenerate">Jana semula jawapan</string>
+    <string name="cd_delete_session">Padam sesi sembang</string>
+    <string name="cd_hero_banner">Ilustrasi teras rangkaian neural CarbonPro</string>
+    <string name="cd_toggle_key_visibility">Tukar paparan kunci API</string>
+    <string name="prompt_hint">Tanya CarbonPro apa sahaja (kod, keselamatan, matematik, logik)...</string>
+    <string name="settings_title">Tetapan API &amp; Enjin</string>
+    <string name="new_chat_label">Sembang Baharu</string>
+</resources>
