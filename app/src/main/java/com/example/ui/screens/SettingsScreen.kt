@@ -81,6 +81,7 @@ fun SettingsScreen(
     onSystemPromptChange: (String) -> Unit,
     onResetSystemPrompt: () -> Unit,
     onStructuredOutputChange: (Boolean) -> Unit,
+    onDeepAgentModeChange: (Boolean) -> Unit,
     onTemperatureChange: (Float) -> Unit,
     onThemeChange: (ThemePreference) -> Unit
 ) {
@@ -184,6 +185,38 @@ fun SettingsScreen(
 
                 if (settings.engineMode == EngineMode.CLOUD_BUILTIN) {
                     item {
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        val isFirebaseConfigured = remember {
+                            com.google.firebase.FirebaseApp.getApps(context).isNotEmpty() ||
+                                com.google.firebase.FirebaseApp.initializeApp(context) != null
+                        }
+                        if (!isFirebaseConfigured) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.ErrorOutline,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = "APK ini dibina tanpa app/google-services.json. Tambah secret GOOGLE_SERVICES_JSON dalam GitHub Actions atau jana APK terus dari AI Studio, atau tukar ke mod Pelayan Tersuai.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                        }
+
                         SectionCard(title = "2. Model Awan & Kawalan Tapisan") {
                             CarbonSettings.AVAILABLE_CLOUD_MODELS.forEach { (modelId, label) ->
                                 Row(
@@ -390,6 +423,29 @@ fun SettingsScreen(
 
                 item {
                     SectionCard(title = "3. Protokol Penaakulan & Parameter") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Mod Deep Agent (2-Fasa & Semakan Kendiri)",
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    text = "Fasa 1 Analisis & Hipotesis diikuti Fasa 2 Semakan Pepijat sebelum jawapan akhir",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = settings.deepAgentMode,
+                                onCheckedChange = onDeepAgentModeChange
+                            )
+                        }
+
+                        Spacer(Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,

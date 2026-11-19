@@ -32,9 +32,10 @@ private const val TAG = "ChatViewModel"
 
 sealed interface GenerationState {
     data object Idle : GenerationState
-    data object Thinking : GenerationState
+    data class Thinking(val phaseLabel: String = "CarbonPro sedang menganalisis & menaakul...") : GenerationState
     data class Streaming(
         val messageId: String,
+        val phaseLabel: String,
         val visibleText: String,
         val thinkingText: String?
     ) : GenerationState
@@ -168,6 +169,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 sessionId = sessionId,
                 prompt = effectivePrompt,
                 history = historyBeforeUser,
+                sessionMemorySummary = existingSession?.memorySummary.orEmpty(),
                 imageUri = imageUri,
                 currentSettings = currentSettings
             )
@@ -183,14 +185,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (lastUserIndex == -1) return@launch
 
             val lastUserMsg = allMessages[lastUserIndex]
-            // Remove any assistant/error messages after the last user prompt
             allMessages.drop(lastUserIndex + 1).forEach { dao.deleteMessage(it.id) }
 
             val historyBeforeUser = allMessages.take(lastUserIndex)
+            val session = dao.getSession(currentId)
             runInference(
                 sessionId = currentId,
                 prompt = lastUserMsg.content,
                 history = historyBeforeUser,
+                sessionMemorySummary = session?.memorySummary.orEmpty(),
                 imageUri = lastUserMsg.imageUri,
                 currentSettings = settings.value
             )
@@ -201,11 +204,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sessionId: String,
         prompt: String,
         history: List<ChatMessageEntity>,
+        sessionMemorySummary: String,
         imageUri: String?,
         currentSettings: CarbonSettings
     ) {
         val assistantMsgId = UUID.randomUUID().toString()
-        _generationState.value = GenerationState.Thinking
+        var currentPhase = if (currentSettings.deepAgentMode) {
+            "Fasa 1/2: Analisis & Penjanaan Hipotesis..."
+        } else {
+            "CarbonPro sedang menjana jawapan..."
+        }
+        _generationState.value = GenerationState.Thinking(currentPhase)
 
         var latestVisible = ""
         var latestThinking: String? = null
@@ -215,16 +224,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             aiRepository.streamReply(
                 prompt = prompt,
                 history = history,
+                sessionMemorySummary = sessionMemorySummary,
                 imageUri = imageUri,
                 settings = currentSettings
             ).collect { chunk ->
                 when (chunk) {
+                    is StreamChunk.Phase -> {
+                        currentPhase = chunk.label
+                        if (latestVisible.isBlank()) {
+                            _generationState.value = GenerationState.Thinking(currentPhase)
+                        } else {
+                            _generationState.value = GenerationState.Streaming(
+                                messageId = assistantMsgId,
+                                phaseLabel = currentPhase,
+                                visibleText = latestVisible,
+                                thinkingText = latestThinking
+                            )
+                        }
+                    }
                     is StreamChunk.Delta -> {
                         latestVisible = chunk.visibleText
                         latestThinking = chunk.thinkingText
                         latestStructured = chunk.structuredJson
                         _generationState.value = GenerationState.Streaming(
                             messageId = assistantMsgId,
+                            phaseLabel = currentPhase,
                             visibleText = chunk.visibleText,
                             thinkingText = chunk.thinkingText
                         )
@@ -249,11 +273,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             dao.upsertSession(session.copy(updatedAt = ts))
                         }
                         _generationState.value = GenerationState.Idle
+                        maybeCompressColdMemory(sessionId, currentSettings)
                     }
                 }
             }
         } catch (e: CancellationException) {
-            if (latestVisible.isNotBlank()) {
+            if (latestVisible.isNotBlank() && !latestVisible.startsWith("Menjalankan Fasa 1/2")) {
                 dao.upsertMessage(
                     ChatMessageEntity(
                         id = assistantMsgId,
@@ -282,6 +307,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
             _generationState.value = GenerationState.Error(errMsg)
+        }
+    }
+
+    private fun maybeCompressColdMemory(sessionId: String, currentSettings: CarbonSettings) {
+        viewModelScope.launch {
+            val all = dao.getMessagesOnce(sessionId).filter { !it.isError }
+            if (all.size <= 16) return@launch
+            val session = dao.getSession(sessionId) ?: return@launch
+            val coldSlice = all.dropLast(12).takeLast(6)
+            val compressed = aiRepository.compressSessionMemory(
+                coldMessages = coldSlice,
+                existingSummary = session.memorySummary,
+                settings = currentSettings
+            )
+            if (!compressed.isNullOrBlank()) {
+                dao.upsertSession(session.copy(memorySummary = compressed))
+            }
         }
     }
 
@@ -337,6 +379,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setStructuredOutputEnabled(enabled: Boolean) {
         viewModelScope.launch { settingsRepo.updateSettings { it.copy(structuredOutputEnabled = enabled) } }
+    }
+
+    fun setDeepAgentMode(enabled: Boolean) {
+        viewModelScope.launch { settingsRepo.updateSettings { it.copy(deepAgentMode = enabled) } }
     }
 
     fun setTemperature(temp: Float) {

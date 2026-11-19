@@ -118,6 +118,7 @@ fun ChatScreen(
     onNewSession: () -> Unit,
     onDeleteSession: (String) -> Unit,
     onToggleStructuredOutput: (Boolean) -> Unit,
+    onToggleDeepAgent: (Boolean) -> Unit,
     onOpenSettings: () -> Unit
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -244,6 +245,8 @@ fun ChatScreen(
                     isGenerating = isGenerating,
                     structuredOutputEnabled = settings.structuredOutputEnabled,
                     onToggleStructured = onToggleStructuredOutput,
+                    deepAgentMode = settings.deepAgentMode,
+                    onToggleDeepAgent = onToggleDeepAgent,
                     isCustomServer = settings.engineMode == EngineMode.CUSTOM_SERVER,
                     onSend = {
                         val text = promptInput
@@ -294,11 +297,12 @@ fun ChatScreen(
 
                         if (generationState is GenerationState.Thinking) {
                             item(key = "thinking_indicator") {
-                                ThinkingPulseBubble()
+                                ThinkingPulseBubble(phaseLabel = generationState.phaseLabel)
                             }
                         } else if (generationState is GenerationState.Streaming) {
                             item(key = "streaming_bubble") {
                                 StreamingAssistantBubble(
+                                    phaseLabel = generationState.phaseLabel,
                                     visibleText = generationState.visibleText,
                                     thinkingText = generationState.thinkingText
                                 )
@@ -828,7 +832,7 @@ private fun ChatMessageBubble(
 }
 
 @Composable
-private fun ThinkingPulseBubble() {
+private fun ThinkingPulseBubble(phaseLabel: String) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(16.dp),
@@ -846,7 +850,7 @@ private fun ThinkingPulseBubble() {
             )
             Spacer(Modifier.width(12.dp))
             Text(
-                text = "CarbonPro sedang menganalisis & menaakul...",
+                text = phaseLabel,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
             )
@@ -856,6 +860,7 @@ private fun ThinkingPulseBubble() {
 
 @Composable
 private fun StreamingAssistantBubble(
+    phaseLabel: String,
     visibleText: String,
     thinkingText: String?
 ) {
@@ -874,7 +879,7 @@ private fun StreamingAssistantBubble(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    text = "MENSTRIM JAWAPAN...",
+                    text = phaseLabel.uppercase(),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -899,6 +904,8 @@ private fun ChatComposerBar(
     isGenerating: Boolean,
     structuredOutputEnabled: Boolean,
     onToggleStructured: (Boolean) -> Unit,
+    deepAgentMode: Boolean,
+    onToggleDeepAgent: (Boolean) -> Unit,
     isCustomServer: Boolean,
     onSend: () -> Unit,
     onStop: () -> Unit
@@ -927,11 +934,23 @@ private fun ChatComposerBar(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     FilterChip(
+                        selected = deepAgentMode,
+                        onClick = { onToggleDeepAgent(!deepAgentMode) },
+                        label = {
+                            Text(
+                                text = "Deep Agent 2-Fasa",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        },
+                        modifier = Modifier.testTag("toggle_deep_agent_chip")
+                    )
+
+                    FilterChip(
                         selected = structuredOutputEnabled,
                         onClick = { onToggleStructured(!structuredOutputEnabled) },
                         label = {
                             Text(
-                                text = "JSON Ejen Berstruktur",
+                                text = "JSON Ejen",
                                 style = MaterialTheme.typography.labelSmall
                             )
                         },

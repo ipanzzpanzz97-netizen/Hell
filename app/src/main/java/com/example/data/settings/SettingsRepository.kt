@@ -42,6 +42,7 @@ data class CarbonSettings(
     val customUseSse: Boolean = true,
     val systemPrompt: String = DEFAULT_CARBON_SYSTEM_PROMPT,
     val structuredOutputEnabled: Boolean = false,
+    val deepAgentMode: Boolean = true,
     val temperature: Float = 0.7f,
     val themePreference: ThemePreference = ThemePreference.DARK
 ) {
@@ -76,6 +77,7 @@ class SettingsRepository(private val context: Context) {
         val CUSTOM_USE_SSE = booleanPreferencesKey("custom_use_sse")
         val SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         val STRUCTURED_OUTPUT = booleanPreferencesKey("structured_output")
+        val DEEP_AGENT_MODE = booleanPreferencesKey("deep_agent_mode")
         val TEMPERATURE = floatPreferencesKey("temperature")
         val THEME_PREFERENCE = stringPreferencesKey("theme_preference")
     }
@@ -95,6 +97,7 @@ class SettingsRepository(private val context: Context) {
             customUseSse = prefs[Keys.CUSTOM_USE_SSE] ?: true,
             systemPrompt = prefs[Keys.SYSTEM_PROMPT] ?: CarbonSettings.DEFAULT_CARBON_SYSTEM_PROMPT,
             structuredOutputEnabled = prefs[Keys.STRUCTURED_OUTPUT] ?: false,
+            deepAgentMode = prefs[Keys.DEEP_AGENT_MODE] ?: true,
             temperature = prefs[Keys.TEMPERATURE] ?: 0.7f,
             themePreference = prefs[Keys.THEME_PREFERENCE]?.let {
                 runCatching { ThemePreference.valueOf(it) }.getOrNull()
@@ -118,6 +121,7 @@ class SettingsRepository(private val context: Context) {
                 customUseSse = prefs[Keys.CUSTOM_USE_SSE] ?: true,
                 systemPrompt = prefs[Keys.SYSTEM_PROMPT] ?: CarbonSettings.DEFAULT_CARBON_SYSTEM_PROMPT,
                 structuredOutputEnabled = prefs[Keys.STRUCTURED_OUTPUT] ?: false,
+                deepAgentMode = prefs[Keys.DEEP_AGENT_MODE] ?: true,
                 temperature = prefs[Keys.TEMPERATURE] ?: 0.7f,
                 themePreference = prefs[Keys.THEME_PREFERENCE]?.let {
                     runCatching { ThemePreference.valueOf(it) }.getOrNull()
@@ -133,6 +137,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.CUSTOM_USE_SSE] = updated.customUseSse
             prefs[Keys.SYSTEM_PROMPT] = updated.systemPrompt
             prefs[Keys.STRUCTURED_OUTPUT] = updated.structuredOutputEnabled
+            prefs[Keys.DEEP_AGENT_MODE] = updated.deepAgentMode
             prefs[Keys.TEMPERATURE] = updated.temperature
             prefs[Keys.THEME_PREFERENCE] = updated.themePreference.name
         }

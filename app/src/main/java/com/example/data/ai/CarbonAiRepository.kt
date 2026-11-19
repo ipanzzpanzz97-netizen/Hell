@@ -10,6 +10,7 @@ import com.example.data.settings.CarbonSettings
 import com.example.data.settings.EngineMode
 import com.example.data.settings.SafetyThresholdOption
 import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
 import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Content
@@ -44,6 +45,7 @@ import kotlin.system.measureTimeMillis
 private const val TAG = "CarbonAiRepository"
 
 sealed interface StreamChunk {
+    data class Phase(val label: String) : StreamChunk
     data class Delta(
         val visibleText: String,
         val thinkingText: String? = null,
@@ -107,64 +109,176 @@ class CarbonAiRepository(private val context: Context) {
     fun streamReply(
         prompt: String,
         history: List<ChatMessageEntity>,
+        sessionMemorySummary: String,
         imageUri: String?,
         settings: CarbonSettings
     ): Flow<StreamChunk> {
         return when (settings.engineMode) {
-            EngineMode.CLOUD_BUILTIN -> streamViaFirebaseAi(prompt, history, imageUri, settings)
-            EngineMode.CUSTOM_SERVER -> streamViaCustomApi(prompt, history, settings)
+            EngineMode.CLOUD_BUILTIN -> streamViaFirebaseAi(
+                prompt, history, sessionMemorySummary, imageUri, settings
+            )
+            EngineMode.CUSTOM_SERVER -> streamViaCustomApi(
+                prompt, history, sessionMemorySummary, settings
+            )
         }
+    }
+
+    suspend fun compressSessionMemory(
+        coldMessages: List<ChatMessageEntity>,
+        existingSummary: String,
+        settings: CarbonSettings
+    ): String? = withContext(Dispatchers.IO) {
+        if (coldMessages.isEmpty()) return@withContext null
+        val transcript = coldMessages.joinToString("\n") { msg ->
+            "${msg.role.uppercase()}: ${msg.content.take(500)}"
+        }
+        val compressPrompt = buildString {
+            appendLine("Ringkaskan sejarah perbualan lama berikut menjadi memori teknikal padat (maksimum 180 patah perkataan).")
+            appendLine("Kekalkan hanya: keputusan seni bina, pemboleh ubah/API penting, kekangan pengguna, dan matlamat semasa.")
+            if (existingSummary.isNotBlank()) {
+                appendLine("\nMemori Sedia Ada:\n$existingSummary")
+            }
+            appendLine("\nMesej Untuk Dimampatkan:\n$transcript")
+        }
+
+        return@withContext runCatching {
+            when (settings.engineMode) {
+                EngineMode.CLOUD_BUILTIN -> {
+                    if (FirebaseApp.getApps(context).isEmpty()) {
+                        FirebaseApp.initializeApp(context)
+                    }
+                    if (FirebaseApp.getApps(context).isEmpty()) return@runCatching null
+                    val model = buildFirebaseModel(settings.copy(structuredOutputEnabled = false), forceFastModel = true)
+                    withTimeout(30_000L) {
+                        model.generateContent(compressPrompt).text?.trim()
+                    }
+                }
+                EngineMode.CUSTOM_SERVER -> {
+                    if (settings.customApiUrl.isBlank()) return@runCatching null
+                    executeCustomSingleShot(compressPrompt, settings)
+                }
+            }
+        }.getOrNull()
     }
 
     private fun streamViaFirebaseAi(
         prompt: String,
         history: List<ChatMessageEntity>,
+        sessionMemorySummary: String,
         imageUri: String?,
         settings: CarbonSettings
     ): Flow<StreamChunk> = flow {
-        val model = buildFirebaseModel(settings)
-        val bitmap = imageUri?.let { loadScaledBitmap(Uri.parse(it)) }
-
-        val chatHistory: List<Content> = history
-            .filter { !it.isError && it.content.isNotBlank() }
-            .takeLast(24)
-            .map { msg ->
-                val role = if (msg.role == "user") "user" else "model"
-                content(role) {
-                    text(msg.structuredJson ?: msg.content)
-                }
-            }
-
-        val userContent = content("user") {
-            if (bitmap != null) {
-                image(bitmap)
-            }
-            text(prompt)
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            FirebaseApp.initializeApp(context)
+        }
+        if (FirebaseApp.getApps(context).isEmpty()) {
+            throw IllegalStateException(
+                "FirebaseApp belum diinisialisasi kerana fail konfigurasi app/google-services.json tiada semasa APK ini dibina.\n\n" +
+                    "Penyelesaian:\n" +
+                    "1. Jika anda bina APK melalui GitHub Actions, pastikan app/google-services.json wujud atau tambah secret GOOGLE_SERVICES_JSON di GitHub Repository Secrets.\n" +
+                    "2. Atau eksport APK terus dari AI Studio (Settings > Generate APK).\n" +
+                    "3. Atau buka Tetapan API & Enjin dan guna mod 'Pelayan Tersuai' dengan API_URL anda."
+            )
         }
 
-        val rawAccumulator = StringBuilder()
+        val bitmap = imageUri?.let { loadScaledBitmap(Uri.parse(it)) }
 
         try {
-            withTimeout(60_000L) {
-                val chat = model.startChat(history = chatHistory)
-                chat.sendMessageStream(userContent).collect { chunk ->
-                    currentCoroutineContext().ensureActive()
-                    val delta = chunk.text.orEmpty()
-                    if (delta.isNotEmpty()) {
-                        rawAccumulator.append(delta)
-                        val parsed = parseReasoningAndContent(
-                            raw = rawAccumulator.toString(),
-                            isStructuredMode = settings.structuredOutputEnabled
-                        )
-                        emit(
-                            StreamChunk.Delta(
-                                visibleText = parsed.visibleText,
-                                thinkingText = parsed.thinkingText,
-                                structuredJson = parsed.structuredJson
-                            )
-                        )
-                    }
+            val hotHistory = buildFirebaseHistory(history, sessionMemorySummary)
+            var deepAnalysisText: String? = null
+
+            if (settings.deepAgentMode) {
+                emit(StreamChunk.Phase("Fasa 1/2: Analisis, Hipotesis & Semakan Kekangan..."))
+                val plannerModel = buildFirebaseModel(
+                    settings = settings.copy(structuredOutputEnabled = false, temperature = 0.35f),
+                    systemOverride = DEEP_PLANNER_INSTRUCTION
+                )
+                val analysisBuffer = StringBuilder()
+                val plannerInput = content("user") {
+                    if (bitmap != null) image(bitmap)
+                    text(
+                        buildString {
+                            if (sessionMemorySummary.isNotBlank()) {
+                                appendLine("[Memori Konteks Terkompresi]: $sessionMemorySummary\n")
+                            }
+                            append(prompt)
+                        }
+                    )
                 }
+
+                withTimeout(45_000L) {
+                    plannerModel.startChat(history = hotHistory.takeLast(8))
+                        .sendMessageStream(plannerInput)
+                        .collect { chunk ->
+                            currentCoroutineContext().ensureActive()
+                            val delta = chunk.text.orEmpty()
+                            if (delta.isNotEmpty()) {
+                                analysisBuffer.append(delta)
+                                emit(
+                                    StreamChunk.Delta(
+                                        visibleText = "Menjalankan Fasa 1/2 (Analisis & Penjanaan Hipotesis)...",
+                                        thinkingText = analysisBuffer.toString()
+                                    )
+                                )
+                            }
+                        }
+                }
+                deepAnalysisText = analysisBuffer.toString().trim().ifBlank { null }
+            }
+
+            emit(
+                StreamChunk.Phase(
+                    if (settings.deepAgentMode) {
+                        "Fasa 2/2: Simulasi, Semakan Kendiri & Sintesis Akhir..."
+                    } else {
+                        "Menjana jawapan..."
+                    }
+                )
+            )
+
+            val synthesizerModel = buildFirebaseModel(settings)
+            val finalPromptText = if (deepAnalysisText != null) {
+                buildString {
+                    appendLine("Permintaan Pengguna:")
+                    appendLine(prompt)
+                    appendLine("\n[Draf Analisis & Hipotesis Dalaman (Fasa 1)]:")
+                    appendLine(deepAnalysisText)
+                    appendLine(
+                        "\nArahan Fasa 2 (Build-and-Verify): Semak draf analisis di atas untuk sebarang pepijat logik, API usang, atau kelemahan keselamatan. Betulkan secara kendiri dan hasilkan jawapan akhir yang lengkap, tepat, serta sedia digunakan."
+                    )
+                }
+            } else {
+                prompt
+            }
+
+            val finalContent = content("user") {
+                if (bitmap != null) image(bitmap)
+                text(finalPromptText)
+            }
+
+            val rawAccumulator = StringBuilder()
+            withTimeout(60_000L) {
+                synthesizerModel.startChat(history = hotHistory)
+                    .sendMessageStream(finalContent)
+                    .collect { chunk ->
+                        currentCoroutineContext().ensureActive()
+                        val delta = chunk.text.orEmpty()
+                        if (delta.isNotEmpty()) {
+                            rawAccumulator.append(delta)
+                            val parsed = parseReasoningAndContent(
+                                raw = rawAccumulator.toString(),
+                                explicitThinking = deepAnalysisText,
+                                isStructuredMode = settings.structuredOutputEnabled
+                            )
+                            emit(
+                                StreamChunk.Delta(
+                                    visibleText = parsed.visibleText,
+                                    thinkingText = parsed.thinkingText,
+                                    structuredJson = parsed.structuredJson
+                                )
+                            )
+                        }
+                    }
             }
 
             val finalRaw = rawAccumulator.toString().trim()
@@ -174,6 +288,7 @@ class CarbonAiRepository(private val context: Context) {
 
             val finalParsed = parseReasoningAndContent(
                 raw = finalRaw,
+                explicitThinking = deepAnalysisText,
                 isStructuredMode = settings.structuredOutputEnabled
             )
             emit(
@@ -196,7 +311,29 @@ class CarbonAiRepository(private val context: Context) {
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun buildFirebaseModel(settings: CarbonSettings): GenerativeModel {
+    private fun buildFirebaseHistory(
+        history: List<ChatMessageEntity>,
+        sessionMemorySummary: String
+    ): List<Content> {
+        val list = mutableListOf<Content>()
+        if (sessionMemorySummary.isNotBlank()) {
+            list.add(content("user") { text("[Memori Konteks Sesi Terdahulu]\n$sessionMemorySummary") })
+            list.add(content("model") { text("Difahami. Saya mengekalkan konteks terkompresi tersebut dalam memori aktif.") })
+        }
+        history.filter { !it.isError && it.content.isNotBlank() }
+            .takeLast(14)
+            .forEach { msg ->
+                val role = if (msg.role == "user") "user" else "model"
+                list.add(content(role) { text(msg.structuredJson ?: msg.content) })
+            }
+        return list
+    }
+
+    private fun buildFirebaseModel(
+        settings: CarbonSettings,
+        systemOverride: String? = null,
+        forceFastModel: Boolean = false
+    ): GenerativeModel {
         val threshold = when (settings.safetyThreshold) {
             SafetyThresholdOption.ONLY_HIGH -> HarmBlockThreshold.ONLY_HIGH
             SafetyThresholdOption.MEDIUM_AND_ABOVE -> HarmBlockThreshold.MEDIUM_AND_ABOVE
@@ -218,23 +355,24 @@ class CarbonAiRepository(private val context: Context) {
             }
         }
 
-        val systemInstructionContent = settings.systemPrompt
+        val effectiveSystem = (systemOverride ?: settings.systemPrompt)
             .takeIf { it.isNotBlank() }
-            ?.let { promptText ->
-                content { text(promptText) }
-            }
+            ?.let { content { text(it) } }
+
+        val targetModel = if (forceFastModel) "gemini-3.5-flash-lite" else settings.cloudModel
 
         return Firebase.ai.generativeModel(
-            modelName = settings.cloudModel,
+            modelName = targetModel,
             generationConfig = config,
             safetySettings = safetySettings,
-            systemInstruction = systemInstructionContent
+            systemInstruction = effectiveSystem
         )
     }
 
     private fun streamViaCustomApi(
         prompt: String,
         history: List<ChatMessageEntity>,
+        sessionMemorySummary: String,
         settings: CarbonSettings
     ): Flow<StreamChunk> = flow {
         val rawUrl = settings.customApiUrl.trim()
@@ -243,27 +381,30 @@ class CarbonAiRepository(private val context: Context) {
         }
         val endpoint = resolveChatEndpoint(rawUrl)
 
-        val messagesArray = JSONArray().apply {
-            if (settings.systemPrompt.isNotBlank()) {
-                val sysText = if (settings.structuredOutputEnabled) {
-                    "${settings.systemPrompt}\n\nPulangkan output JSON berstruktur dengan medan: status, thought_tokens_used, action_taken, output_payload { code_snippet, explanation, security_checks }."
-                } else {
-                    settings.systemPrompt
+        var deepAnalysisText: String? = null
+        if (settings.deepAgentMode) {
+            emit(StreamChunk.Phase("Fasa 1/2: Analisis & Penjanaan Hipotesis (Pelayan Tersuai)..."))
+            val planPrompt = buildString {
+                if (sessionMemorySummary.isNotBlank()) {
+                    appendLine("[Memori Konteks]: $sessionMemorySummary\n")
                 }
-                put(JSONObject().put("role", "system").put("content", sysText))
+                appendLine(DEEP_PLANNER_INSTRUCTION)
+                appendLine("\nPermintaan Pengguna:\n$prompt")
             }
-            history.filter { !it.isError && it.content.isNotBlank() }
-                .takeLast(24)
-                .forEach { msg ->
-                    put(
-                        JSONObject()
-                            .put("role", if (msg.role == "user") "user" else "assistant")
-                            .put("content", msg.content)
-                    )
-                }
-            put(JSONObject().put("role", "user").put("content", prompt))
+            deepAnalysisText = runCatching {
+                executeCustomSingleShot(planPrompt, settings.copy(temperature = 0.35f))
+            }.getOrNull()?.trim()?.ifBlank { null }
         }
 
+        emit(StreamChunk.Phase(if (settings.deepAgentMode) "Fasa 2/2: Semakan Kendiri & Menstrim Jawapan..." else "Menghubungi pelayan API..."))
+
+        val finalUserPrompt = if (deepAnalysisText != null) {
+            "$prompt\n\n[Analisis Fasa 1]:\n$deepAnalysisText\n\nSemak analisis di atas, perbaiki sebarang ralat, dan berikan jawapan akhir yang lengkap."
+        } else {
+            prompt
+        }
+
+        val messagesArray = buildCustomMessagesArray(finalUserPrompt, history, sessionMemorySummary, settings)
         val payload = JSONObject().apply {
             put("model", settings.customModelName.ifBlank { "carbon-pro" })
             put("messages", messagesArray)
@@ -281,12 +422,11 @@ class CarbonAiRepository(private val context: Context) {
         }
 
         val rawContent = StringBuilder()
-        val rawThinking = StringBuilder()
+        val rawThinking = StringBuilder(deepAnalysisText.orEmpty())
 
         try {
             withTimeout(120_000L) {
-                val response = okHttpClient.newCall(requestBuilder.build()).execute()
-                response.use { resp ->
+                okHttpClient.newCall(requestBuilder.build()).execute().use { resp ->
                     if (!resp.isSuccessful) {
                         val errBody = resp.body?.string().orEmpty().take(300)
                         throw IllegalStateException("Ralat pelayan (${resp.code}): ${errBody.ifBlank { resp.message }}")
@@ -301,8 +441,7 @@ class CarbonAiRepository(private val context: Context) {
                             while (reader.readLine().also { line = it } != null) {
                                 currentCoroutineContext().ensureActive()
                                 val trimmed = line?.trim().orEmpty()
-                                if (trimmed.isEmpty() || trimmed.startsWith(":")) continue
-                                if (!trimmed.startsWith("data:")) continue
+                                if (trimmed.isEmpty() || trimmed.startsWith(":") || !trimmed.startsWith("data:")) continue
 
                                 val dataPart = trimmed.removePrefix("data:").trim()
                                 if (dataPart == "[DONE]") break
@@ -314,14 +453,15 @@ class CarbonAiRepository(private val context: Context) {
                                     if (delta != null) {
                                         val reasoningDelta = delta.optString("reasoning_content", "")
                                         val contentDelta = delta.optString("content", "")
-                                        if (reasoningDelta.isNotEmpty()) rawThinking.append(reasoningDelta)
+                                        if (reasoningDelta.isNotEmpty()) {
+                                            if (rawThinking.isNotEmpty() && !rawThinking.endsWith("\n")) rawThinking.append("\n")
+                                            rawThinking.append(reasoningDelta)
+                                        }
                                         if (contentDelta.isNotEmpty()) rawContent.append(contentDelta)
                                     }
                                 } else {
-                                    // Ollama /api/chat style chunk fallback
                                     val msgObj = json.optJSONObject("message")
-                                    val contentDelta = msgObj?.optString("content", "")
-                                        ?: json.optString("response", "")
+                                    val contentDelta = msgObj?.optString("content", "") ?: json.optString("response", "")
                                     if (contentDelta.isNotEmpty()) rawContent.append(contentDelta)
                                 }
 
@@ -340,10 +480,10 @@ class CarbonAiRepository(private val context: Context) {
                             }
                         }
                     } else {
-                        val responseText = body.string()
-                        val extracted = extractNonStreamingResponse(responseText)
+                        val extracted = extractNonStreamingResponse(body.string())
                         rawContent.append(extracted.first)
                         if (!extracted.second.isNullOrBlank()) {
+                            if (rawThinking.isNotEmpty()) rawThinking.append("\n\n")
                             rawThinking.append(extracted.second)
                         }
                     }
@@ -377,6 +517,57 @@ class CarbonAiRepository(private val context: Context) {
             throw e
         }
     }.flowOn(Dispatchers.IO)
+
+    private fun executeCustomSingleShot(promptText: String, settings: CarbonSettings): String {
+        val endpoint = resolveChatEndpoint(settings.customApiUrl)
+        val payload = JSONObject().apply {
+            put("model", settings.customModelName.ifBlank { "carbon-pro" })
+            put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", promptText)))
+            put("temperature", settings.temperature.toDouble())
+            put("stream", false)
+        }
+        val reqBuilder = Request.Builder()
+            .url(endpoint)
+            .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+        if (settings.customApiKey.isNotBlank()) {
+            reqBuilder.addHeader("Authorization", "Bearer ${settings.customApiKey.trim()}")
+        }
+        okHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
+            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}")
+            val text = resp.body?.string().orEmpty()
+            return extractNonStreamingResponse(text).first
+        }
+    }
+
+    private fun buildCustomMessagesArray(
+        prompt: String,
+        history: List<ChatMessageEntity>,
+        sessionMemorySummary: String,
+        settings: CarbonSettings
+    ): JSONArray = JSONArray().apply {
+        val sysPrompt = buildString {
+            if (settings.systemPrompt.isNotBlank()) append(settings.systemPrompt)
+            if (sessionMemorySummary.isNotBlank()) {
+                append("\n\n[Memori Konteks Terkompresi]:\n").append(sessionMemorySummary)
+            }
+            if (settings.structuredOutputEnabled) {
+                append("\n\nPulangkan output JSON berstruktur dengan medan: status, thought_tokens_used, action_taken, output_payload { code_snippet, explanation, security_checks }.")
+            }
+        }
+        if (sysPrompt.isNotBlank()) {
+            put(JSONObject().put("role", "system").put("content", sysPrompt))
+        }
+        history.filter { !it.isError && it.content.isNotBlank() }
+            .takeLast(16)
+            .forEach { msg ->
+                put(
+                    JSONObject()
+                        .put("role", if (msg.role == "user") "user" else "assistant")
+                        .put("content", msg.content)
+                )
+            }
+        put(JSONObject().put("role", "user").put("content", prompt))
+    }
 
     suspend fun testCustomConnection(apiUrl: String, apiKey: String): ConnectionTestResult =
         withContext(Dispatchers.IO) {
@@ -423,35 +614,23 @@ class CarbonAiRepository(private val context: Context) {
     }
 
     private fun extractNonStreamingResponse(rawJson: String): Pair<String, String?> {
-        val obj = runCatching { JSONObject(rawJson) }.getOrNull()
-            ?: return rawJson to null
-
-        // OpenAI / vLLM / TGI compatible
+        val obj = runCatching { JSONObject(rawJson) }.getOrNull() ?: return rawJson to null
         val choices = obj.optJSONArray("choices")
         if (choices != null && choices.length() > 0) {
             val first = choices.getJSONObject(0)
             val message = first.optJSONObject("message")
             if (message != null) {
-                val content = message.optString("content", "")
-                val reasoning = message.optString("reasoning_content", "").ifBlank { null }
-                return content to reasoning
+                return message.optString("content", "") to message.optString("reasoning_content", "").ifBlank { null }
             }
             val text = first.optString("text", "")
             if (text.isNotBlank()) return text to null
         }
-
-        // Ollama /api/chat
         val messageObj = obj.optJSONObject("message")
         if (messageObj != null) {
             val content = messageObj.optString("content", "")
             if (content.isNotBlank()) return content to null
         }
-
-        // Direct CARBON-PRO JSON payload
-        if (obj.has("output_payload")) {
-            return obj.toString(2) to null
-        }
-
+        if (obj.has("output_payload")) return obj.toString(2) to null
         return rawJson to null
     }
 
@@ -469,7 +648,6 @@ class CarbonAiRepository(private val context: Context) {
         var thinking = explicitThinking
         var visible = raw
 
-        // Extract <thought>...</thought> or <think>...</think> if emitted by reasoning models
         val tagRegex = Regex("<(thought|think)>(.*?)</\\1>", RegexOption.DOT_MATCHES_ALL)
         val match = tagRegex.find(raw)
         if (match != null) {
@@ -517,21 +695,25 @@ class CarbonAiRepository(private val context: Context) {
     private fun loadScaledBitmap(uri: Uri): Bitmap? {
         return try {
             val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, options)
-            }
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
             val maxDim = max(options.outWidth, options.outHeight)
             var sampleSize = 1
-            while (maxDim / sampleSize > 1280) {
-                sampleSize *= 2
-            }
+            while (maxDim / sampleSize > 1280) sampleSize *= 2
             val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                BitmapFactory.decodeStream(stream, null, decodeOptions)
-            }
+            context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOptions) }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to decode attached image", e)
             null
         }
+    }
+
+    companion object {
+        private val DEEP_PLANNER_INSTRUCTION = """
+            Anda ialah Modul Pemikiran Fasa 1 CARBON-PRO (Thinking Protocol).
+            Tugas anda HANYA menghasilkan pelan penaakulan dalaman yang ringkas dan tajam (maksimum 220 patah perkataan) dalam bentuk poin bernombor:
+            1. Analisis kebergantungan, API, dan kekangan teknikal.
+            2. Bandingkan 2 pendekatan/hipotesis penyelesaian terbaik dan pilih yang paling tepat.
+            3. Kenal pasti potensi pepijat, kes pinggiran, atau risiko keselamatan yang mesti dielakkan dalam Fasa 2.
+        """.trimIndent()
     }
 }

@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [ChatSessionEntity::class, ChatMessageEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class ChatDatabase : RoomDatabase() {
@@ -23,7 +23,10 @@ abstract class ChatDatabase : RoomDatabase() {
                     context.applicationContext,
                     ChatDatabase::class.java,
                     "carbon_pro_chat.db"
-                ).build().also { INSTANCE = it }
+                )
+                    .fallbackToDestructiveMigration(dropAllTables = true)
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

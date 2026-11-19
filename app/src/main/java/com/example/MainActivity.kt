@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
                             onNewSession = viewModel::startNewSession,
                             onDeleteSession = viewModel::deleteSession,
                             onToggleStructuredOutput = viewModel::setStructuredOutputEnabled,
+                            onToggleDeepAgent = viewModel::setDeepAgentMode,
                             onOpenSettings = { navController.navigate(ROUTE_SETTINGS) }
                         )
                     }
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
                             onSystemPromptChange = viewModel::setSystemPrompt,
                             onResetSystemPrompt = viewModel::resetSystemPrompt,
                             onStructuredOutputChange = viewModel::setStructuredOutputEnabled,
+                            onDeepAgentModeChange = viewModel::setDeepAgentMode,
                             onTemperatureChange = viewModel::setTemperature,
                             onThemeChange = viewModel::setThemePreference
                         )
